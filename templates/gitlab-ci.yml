@@ -1,0 +1,278 @@
+# ============================================================================
+# ISNAD Scanner — GitLab CI/CD Integration Template
+# ============================================================================
+#
+# Drop this into your project as .gitlab-ci.yml (or include it remotely)
+# to scan AI agent skills/resources for malicious patterns.
+#
+# Quick start:
+#   1. Copy this file to .gitlab-ci.yml in your repo root
+#   2. Optionally set ISNAD_TARGET in CI/CD variables
+#   3. Push — scans run automatically on every pipeline
+#
+# Docs: docs/gitlab-ci.md
+# ============================================================================
+
+variables:
+  # ── Scan targets ──────────────────────────────────────────────────────────
+  # Glob pattern for files to scan. Defaults to all JS/TS/Python files.
+  ISNAD_TARGET: "**/*.{js,ts,py,mjs,cjs}"
+
+  # ── Output ────────────────────────────────────────────────────────────────
+  # Output format for GitLab Security Dashboard:
+  #   "gitlab" — GitLab Security Report format (default, shows in Security Dashboard)
+  #   "sarif"  — SARIF 2.1.0 (for external tools)
+  #   "json"   — Raw isnad-scanner JSON
+  ISNAD_OUTPUT_FORMAT: "gitlab"
+
+  # ── Behavior ──────────────────────────────────────────────────────────────
+  # Fail the pipeline on critical/high findings (true/false)
+  ISNAD_FAIL_ON_RISK: "true"
+  # Stop scanning after the first critical/high finding
+  ISNAD_FAIL_FAST: "false"
+
+  # ── Scanner version ──────────────────────────────────────────────────────
+  # Pin a version or use "latest"
+  ISNAD_VERSION: "latest"
+
+  # ── Node / Docker ─────────────────────────────────────────────────────────
+  ISNAD_NODE_IMAGE: "node:20-alpine"
+
+stages:
+  - test
+  - security
+
+# ============================================================================
+# Stage: security — ISNAD Scan
+# ============================================================================
+isnad-scan:
+  stage: security
+  image: ${ISNAD_NODE_IMAGE}
+  variables:
+    NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.npm-cache"
+
+  cache:
+    key:
+      prefix: isnad-scanner
+      files:
+        - package-lock.json
+    paths:
+      - .npm-cache/
+      - node_modules/
+    policy: pull-push
+
+  before_script:
+    # ── Install isnad-scanner ───────────────────────────────────────────────
+    # If the project already lists @isnad/scanner as a dependency, use it.
+    # Otherwise install via npm for npx to resolve.
+    - |
+      if [ -f "package.json" ] && grep -q "@isnad/scanner" package.json 2>/dev/null; then
+        echo "▸ Installing project dependencies (scanner is a local dep)..."
+        npm ci --prefer-offline --no-audit
+      else
+        echo "▸ Installing @isnad/scanner..."
+        if [ "$ISNAD_VERSION" = "latest" ]; then
+          npm install -g @isnad/scanner
+        else
+          npm install -g "@isnad/scanner@${ISNAD_VERSION}"
+        fi
+      fi
+
+  script:
+    - echo "╔══════════════════════════════════════════╗"
+    - echo "║        ISNAD Scanner — GitLab CI         ║"
+    - echo "╚══════════════════════════════════════════╝"
+    - echo ""
+    - echo "Target pattern  → ${ISNAD_TARGET}"
+    - echo "Output format   → ${ISNAD_OUTPUT_FORMAT}"
+    - echo "Fail on risk    → ${ISNAD_FAIL_ON_RISK}"
+    - echo "Fail fast       → ${ISNAD_FAIL_FAST}"
+    - echo ""
+
+    # ── Run the scan ──────────────────────────────────────────────────────
+    - |
+      SCAN_CMD="npx @isnad/scanner batch"
+      SCAN_ARGS=""
+      if [ "$ISNAD_FAIL_FAST" = "true" ]; then
+        SCAN_ARGS="$SCAN_ARGS --fail-fast"
+      fi
+
+      # Always produce JSON first (base for all conversions)
+      set +e
+      $SCAN_CMD "${ISNAD_TARGET}" --json $SCAN_ARGS > isnad-results.json 2>&1
+      SCAN_EXIT=$?
+      set -e
+
+      echo "Scanner exit code: $SCAN_EXIT"
+      echo ""
+
+    # ── Convert output ────────────────────────────────────────────────────
+    - |
+      if [ "$ISNAD_OUTPUT_FORMAT" = "gitlab" ] || [ "$ISNAD_OUTPUT_FORMAT" = "sarif" ]; then
+        node -e "
+          const fs = require('fs');
+          const crypto = require('crypto');
+
+          const raw = fs.readFileSync('isnad-results.json', 'utf8');
+          const results = JSON.parse(raw);
+          const arr = Array.isArray(results) ? results : [results];
+
+          const FORMAT = process.env.ISNAD_OUTPUT_FORMAT || 'gitlab';
+          const startTime = new Date().toISOString();
+
+          if (FORMAT === 'gitlab') {
+            // ── GitLab Security Report format ──────────────────────────
+            const vulnerabilities = [];
+            for (const entry of arr) {
+              const file = entry.file || 'unknown';
+              const res = entry.result || entry;
+              for (const f of (res.findings || [])) {
+                const idSrc = file + ':' + f.patternId + ':' + f.line;
+                const hash = crypto.createHash('sha256').update(idSrc).digest('hex');
+                const uuid = [
+                  hash.slice(0, 8), hash.slice(8, 12), hash.slice(12, 16),
+                  hash.slice(16, 20), hash.slice(20, 32)
+                ].join('-');
+
+                const severity = f.severity.charAt(0).toUpperCase() + f.severity.slice(1);
+
+                vulnerabilities.push({
+                  id: uuid,
+                  category: 'sast',
+                  name: f.name,
+                  message: f.description,
+                  description: f.description + ' (matched: ' + f.match + ')',
+                  severity: severity,
+                  confidence: 'High',
+                  scanner: { id: 'isnad-scanner', name: 'ISNAD Scanner' },
+                  location: {
+                    file: file,
+                    start_line: f.line,
+                    end_line: f.line
+                  },
+                  identifiers: [{
+                    type: 'isnad_pattern',
+                    name: f.name,
+                    value: f.patternId
+                  }]
+                });
+              }
+            }
+
+            const report = {
+              version: '15.1.0',
+              vulnerabilities: vulnerabilities,
+              scan: {
+                scanner: {
+                  id: 'isnad-scanner',
+                  name: 'ISNAD Scanner',
+                  version: '0.1.0',
+                  vendor: { name: 'ISNAD Protocol' }
+                },
+                type: 'sast',
+                status: 'success',
+                start_time: startTime,
+                end_time: new Date().toISOString()
+              }
+            };
+            fs.writeFileSync('gl-sast-report.json', JSON.stringify(report, null, 2));
+            console.log('GitLab SAST report: ' + vulnerabilities.length + ' vulnerabilities across ' + arr.length + ' files');
+
+          } else if (FORMAT === 'sarif') {
+            // ── SARIF 2.1.0 ────────────────────────────────────────────
+            const sarif = {
+              '\$schema': 'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json',
+              version: '2.1.0',
+              runs: [{
+                tool: {
+                  driver: {
+                    name: 'isnad-scanner',
+                    informationUri: 'https://isnad.md',
+                    version: '0.1.0',
+                    rules: []
+                  }
+                },
+                results: []
+              }]
+            };
+            const rulesMap = new Map();
+            const run = sarif.runs[0];
+            for (const entry of arr) {
+              const file = entry.file || 'unknown';
+              const res = entry.result || entry;
+              for (const f of (res.findings || [])) {
+                if (!rulesMap.has(f.patternId)) {
+                  rulesMap.set(f.patternId, {
+                    id: f.patternId,
+                    name: f.name,
+                    shortDescription: { text: f.name },
+                    fullDescription: { text: f.description },
+                    defaultConfiguration: {
+                      level: f.severity === 'critical' || f.severity === 'high' ? 'error' :
+                             f.severity === 'medium' ? 'warning' : 'note'
+                    },
+                    properties: { severity: f.severity, category: f.category }
+                  });
+                }
+                run.results.push({
+                  ruleId: f.patternId,
+                  level: f.severity === 'critical' || f.severity === 'high' ? 'error' :
+                         f.severity === 'medium' ? 'warning' : 'note',
+                  message: { text: f.description + ' (matched: ' + f.match + ')' },
+                  locations: [{
+                    physicalLocation: {
+                      artifactLocation: { uri: file },
+                      region: {
+                        startLine: f.line,
+                        startColumn: f.column,
+                        snippet: { text: f.context }
+                      }
+                    }
+                  }]
+                });
+              }
+            }
+            run.tool.driver.rules = [...rulesMap.values()];
+            fs.writeFileSync('gl-sast-report.json', JSON.stringify(sarif, null, 2));
+            console.log('SARIF report: ' + run.results.length + ' findings across ' + arr.length + ' files');
+          }
+        "
+      elif [ "$ISNAD_OUTPUT_FORMAT" = "json" ]; then
+        cp isnad-results.json gl-sast-report.json
+        echo "Raw JSON output copied to gl-sast-report.json"
+      fi
+
+    # ── Summary ───────────────────────────────────────────────────────────
+    - |
+      echo ""
+      echo "── Scan complete ──────────────────────────────────────────"
+      if [ -f gl-sast-report.json ]; then
+        echo "Report saved to gl-sast-report.json"
+      fi
+
+    # ── Enforce policy ────────────────────────────────────────────────────
+    - |
+      if [ "$ISNAD_FAIL_ON_RISK" = "true" ] && [ "$SCAN_EXIT" -ne 0 ]; then
+        echo ""
+        echo "⚠ Critical or high-risk findings detected. Failing pipeline."
+        exit 1
+      fi
+
+  artifacts:
+    when: always
+    paths:
+      - isnad-results.json
+      - gl-sast-report.json
+    reports:
+      sast:
+        - gl-sast-report.json
+    expire_in: 30 days
+
+  rules:
+    # Run on merge requests
+    - if: $CI_MERGE_REQUEST_IID
+    # Run on default branch pushes
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    # Allow manual trigger from any branch
+    - when: manual
+      allow_failure: true
