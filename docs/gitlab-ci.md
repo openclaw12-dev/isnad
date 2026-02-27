@@ -22,13 +22,13 @@ That's it. The scanner runs on every pipeline and uploads results to GitLab's Se
 ```
 push / MR ──▶ install @isnad/scanner ──▶ batch scan ──▶ JSON results
                                                             │
-                                                  ┌─────────┴──────────┐
-                                                  ▼                    ▼
-                                          GitLab report        Pipeline pass/fail
-                                       (gl-sast-report.json)
-                                                  │
-                                                  ▼
-                                       GitLab Security Dashboard
+                                              ┌─────────────┼─────────────┐
+                                              ▼             ▼             ▼
+                                       GitLab report   SARIF report   Raw JSON
+                                    (gl-sast-report)  (isnad-sarif)  (isnad-results)
+                                              │
+                                              ▼
+                                   GitLab Security Dashboard
 ```
 
 1. **Install** — pulls `@isnad/scanner` from npm (cached between runs)
@@ -99,16 +99,19 @@ variables:
 
 ### SARIF Output
 
-Generate SARIF 2.1.0 output for external tools:
+Generate SARIF 2.1.0 output for external tools (written to `isnad-sarif.json`):
 
 ```yaml
 variables:
   ISNAD_OUTPUT_FORMAT: "sarif"
 ```
 
+> **Note:** SARIF output is saved as a regular artifact, not as a GitLab SAST report.
+> Only the `gitlab` format integrates with the Security Dashboard.
+
 ### JSON Output Only
 
-Skip conversion, produce raw scanner JSON:
+Skip conversion, produce raw scanner JSON (available as `isnad-results.json`):
 
 ```yaml
 variables:

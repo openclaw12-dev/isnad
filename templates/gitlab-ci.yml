@@ -233,13 +233,14 @@ isnad-scan:
               }
             }
             run.tool.driver.rules = [...rulesMap.values()];
-            fs.writeFileSync('gl-sast-report.json', JSON.stringify(sarif, null, 2));
+            // Write SARIF to its own file (not gl-sast-report.json — SARIF is not
+            // a valid GitLab Security Report and would fail the SAST artifact upload)
+            fs.writeFileSync('isnad-sarif.json', JSON.stringify(sarif, null, 2));
             console.log('SARIF report: ' + run.results.length + ' findings across ' + arr.length + ' files');
           }
         "
       elif [ "$ISNAD_OUTPUT_FORMAT" = "json" ]; then
-        cp isnad-results.json gl-sast-report.json
-        echo "Raw JSON output copied to gl-sast-report.json"
+        echo "Raw JSON output available at isnad-results.json"
       fi
 
     # ── Summary ───────────────────────────────────────────────────────────
@@ -263,7 +264,10 @@ isnad-scan:
     paths:
       - isnad-results.json
       - gl-sast-report.json
+      - isnad-sarif.json
     reports:
+      # Only populated when ISNAD_OUTPUT_FORMAT=gitlab (default).
+      # SARIF and JSON formats produce separate files and skip this report.
       sast:
         - gl-sast-report.json
     expire_in: 30 days
